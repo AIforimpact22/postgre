@@ -1,4 +1,4 @@
-streamlit==1.25.0
-mysql-connector-python==8.1.0
-Pillow==9.4.0
-python-dotenv==1.0.0
+streamlit>=1.25.0
+mysql-connector-python>=8.0.0
+Pillow>=9.0.0
+python-dotenv>=0.20.0
