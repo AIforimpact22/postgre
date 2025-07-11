@@ -1,167 +1,171 @@
+# app.py — shows logo only on pre-login, half size top-center, starts at login
+import os
+import time
+import logging
 import streamlit as st
-import psycopg2
-import re
+from PIL import Image  # for resizing logo
 
-st.set_page_config(page_title="PostgreSQL Admin Portal", layout="wide")
-pg = st.secrets["superuser"]
+# ──────────────────────────────────────────────────────────────────────────────
+#  Debug / instrumentation toggles
+# ──────────────────────────────────────────────────────────────────────────────
+DEBUG_SQL   = os.getenv("DEBUG_SQL", "1") == "1"
+SHOW_SQL_UI = os.getenv("SHOW_SQL_UI", "0") == "1"
 
-# --- Helper functions ---
-def get_conn(dbname=None):
-    return psycopg2.connect(
-        dbname=dbname or pg["dbname"],
-        user=pg["user"],
-        password=pg["password"],
-        host=pg["host"],
-        port=pg["port"]
+if DEBUG_SQL:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)s  %(message)s",
+        datefmt="%H:%M:%S",
     )
 
-def list_databases():
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname;")
-        dbs = [db[0] for db in cur.fetchall()]
-        cur.close()
-        return dbs
+# ──────────────────────────────────────────────────────────────────────────────
+#  Monkey-patch mysql-connector so every cursor.execute() is timed
+# ──────────────────────────────────────────────────────────────────────────────
+def _patch_mysql_execute() -> None:
+    if not DEBUG_SQL:
+        return
+    import mysql.connector
+    if getattr(mysql.connector, "_timed_execute_patched", False):
+        return
+    real_exec = mysql.connector.cursor.MySQLCursor.execute
+    timings_key = "_sql_timings"
 
-def get_schema(dbname):
-    with get_conn(dbname) as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT table_name, column_name, data_type
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-            ORDER BY table_name, ordinal_position;
-        """)
-        rows = cur.fetchall()
-        cur.close()
-        return rows
+    def timed_exec(self, operation, params=None, multi=False):
+        t0 = time.perf_counter()
+        result = real_exec(self, operation, params=params, multi=multi)
+        dur_ms = (time.perf_counter() - t0) * 1000
+        logging.info("[SQL] %7.1f ms  %s",
+                     dur_ms,
+                     (operation if isinstance(operation, str) else str(operation)).split()[0])
+        if SHOW_SQL_UI:
+            st.session_state.setdefault(timings_key, []).append(
+                (operation.split()[0], dur_ms)
+            )
+        return result
 
-# --- Sidebar Button Navigation ---
-st.sidebar.title("Admin Navigation")
-PAGES = ["Create Database", "Edit Database", "Connection Info"]
+    mysql.connector.cursor.MySQLCursor.execute = timed_exec
+    mysql.connector._timed_execute_patched = True
 
-if "active_page" not in st.session_state:
-    st.session_state.active_page = PAGES[0]
+_patch_mysql_execute()
 
-for page in PAGES:
-    if st.sidebar.button(page, key=page):
-        st.session_state.active_page = page
+# ──────────────────────────────────────────────────────────────────────────────
+#  Regular imports (after patch to avoid circular deps)
+# ──────────────────────────────────────────────────────────────────────────────
+from theme           import apply_dark_theme
+from database        import create_tables
+from sidebar         import show_sidebar
+from style           import show_footer
+from importlib       import import_module
+from github_progress import get_user_progress
 
-st.sidebar.markdown("---")
-st.sidebar.caption("Powered by Streamlit & PostgreSQL")
+# ──────────────────────────────────────────────────────────────────────────────
+#  Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+def safe_rerun():
+    if hasattr(st, "experimental_rerun"):
+        st.experimental_rerun()
+    elif hasattr(st, "rerun"):
+        st.rerun()
 
-page = st.session_state.active_page
+def enforce_week_gating(selected: str) -> bool:
+    if selected.startswith("modules_week"):
+        try:
+            week = int(selected.replace("modules_week", ""))
+        except ValueError:
+            return True
+        if week == 1:
+            return True
+        required = {2: 10, 3: 12, 4: 12, 5: 7}
+        username = st.session_state.get("username", "default_user")
+        user_prog = get_user_progress(username)
+        return user_prog.get(f"week{week-1}", 0) >= required.get(week, 0)
+    return True
 
-# --- Create Database Page ---
-if page == "Create Database":
-    st.title("PostgreSQL Admin Portal - Create Database")
-    db_name = st.text_input(
-        "Database name (letters, numbers, underscores only)",
-        max_chars=32,
-        help="Only letters, numbers, and underscores (_). Must start with a letter."
+def show_logo():
+    """Display logo.png at 50% of its original width, centered."""
+    logo_path = os.path.join(os.path.dirname(__file__), "logo.png")
+    if os.path.isfile(logo_path):
+        img = Image.open(logo_path)
+        half_width = img.width // 2
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c2:
+            st.image(img, width=half_width)
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Main Streamlit app
+# ──────────────────────────────────────────────────────────────────────────────
+def main() -> None:
+    build_t0 = time.perf_counter()
+
+    st.set_page_config(
+        page_title="Code for Impact",
+        layout="wide",
+        initial_sidebar_state="expanded",
     )
-    db_valid = bool(re.match(r'^[A-Za-z][A-Za-z0-9_]*$', db_name))
+    apply_dark_theme()
+    create_tables()
 
-    if st.button("Create Database"):
-        if not db_valid:
-            st.error("Invalid database name. Use only letters, numbers, and underscores, starting with a letter.")
+    # Default landing page is login
+    st.session_state.setdefault("page", "login")
+
+    page      = st.session_state["page"]
+    logged_in = st.session_state.get("logged_in", False)
+
+    # ───────────────────────────────────────────────────────────────────────────
+    #  Pre-login flows: show logo + login UI
+    # ───────────────────────────────────────────────────────────────────────────
+    if not logged_in:
+        show_logo()
+        st.markdown("---")
+        if page == "login":
+            import login; login.show_login_create_account()
+        elif page == "loginx":
+            st.warning("Course 2 Login is not available yet.")
+            if st.button("Go Back"):
+                st.session_state["page"] = "login"
+                safe_rerun()
+        elif page == "course2_app":
+            from second.appx import appx; appx.show()
         else:
+            # any other page defaults to login
+            st.session_state["page"] = "login"
+            safe_rerun()
+
+    # ───────────────────────────────────────────────────────────────────────────
+    #  Post-login flows: no logo here
+    # ───────────────────────────────────────────────────────────────────────────
+    else:
+        show_sidebar()
+        if page == "logout":
+            st.session_state["logged_in"] = False
+            st.session_state["page"]      = "login"
+            safe_rerun()
+            return
+
+        if page == "home":
+            import home as _home; _home.show_home()
+        else:
+            if page.startswith("modules_week") and not enforce_week_gating(page):
+                st.warning("You must complete the previous week before accessing this section.")
+                st.stop()
             try:
-                with get_conn() as conn:
-                    cur = conn.cursor()
-                    cur.execute(f'CREATE DATABASE "{db_name}";')
-                    conn.commit()
-                    st.success(f'Database `{db_name}` created successfully!')
-                    cur.close()
-            except psycopg2.errors.DuplicateDatabase:
-                st.warning(f"Database `{db_name}` already exists.")
-            except Exception as e:
-                st.error(f"Error: {e}")
+                module = import_module(page)
+                if hasattr(module, "show"):
+                    module.show()
+                else:
+                    st.warning("The selected module does not have a 'show()' function.")
+            except ImportError as e:
+                st.warning(f"Unknown selection: {e}")
 
-    if st.button("List All Databases"):
-        dbs = list_databases()
-        st.write("Available databases:")
-        st.table(dbs)
+    # ───────────────────────────────────────────────────────────────────────────
+    #  Footer & instrumentation
+    # ───────────────────────────────────────────────────────────────────────────
+    show_footer()
+    st.sidebar.info(f"⏱ Page build: {(time.perf_counter() - build_t0)*1000:.0f} ms")
+    if SHOW_SQL_UI and "_sql_timings" in st.session_state:
+        with st.sidebar.expander("SQL timings"):
+            for verb, dur in st.session_state["_sql_timings"]:
+                st.write(f"{verb:<6} {dur:,.1f} ms")
 
-# --- Edit Database Page ---
-elif page == "Edit Database":
-    st.title("PostgreSQL Admin Portal - Edit Database")
-    dbs = list_databases()
-    db_select = st.selectbox("Choose a database to edit:", dbs)
-
-    if db_select:
-        st.subheader(f"Schema for `{db_select}`")
-        schema = get_schema(db_select)
-        if schema:
-            schema_dict = {}
-            for tbl, col, typ in schema:
-                schema_dict.setdefault(tbl, []).append(f"{col} ({typ})")
-            for table, cols in schema_dict.items():
-                st.markdown(f"**{table}**")
-                st.write(", ".join(cols))
-        else:
-            st.info("No tables in this database yet.")
-
-        st.subheader("SQL Editor")
-        sql = st.text_area(
-            f"Run SQL in `{db_select}` (e.g., CREATE TABLE, SELECT, etc.):",
-            height=120,
-            key="sql_editor"
-        )
-        if st.button("Run SQL", key="run_sql"):
-            with st.spinner("Running SQL..."):
-                try:
-                    with get_conn(db_select) as conn:
-                        cur = conn.cursor()
-                        cur.execute(sql)
-                        if cur.description:
-                            rows = cur.fetchall()
-                            columns = [desc[0] for desc in cur.description]
-                            st.dataframe(rows, columns=columns)
-                            st.success("Query executed and results shown above.")
-                        else:
-                            conn.commit()
-                            st.success("SQL command executed successfully!")
-                        cur.close()
-                except Exception as e:
-                    st.error(f"Error: {e}")
-
-# --- Connection Info Page ---
-elif page == "Connection Info":
-    st.title("PostgreSQL Admin Portal - Connection Info")
-    dbs = list_databases()
-    db_select = st.selectbox("Choose a database for connection info:", dbs, key="conninfo")
-
-    if db_select:
-        st.subheader(f"Secrets.toml snippet for `{db_select}`")
-        section = db_select
-        dsn_toml = f"""
-[{section}]
-host = "{pg['host']}"
-port = {pg['port']}
-user = "{pg['user']}"
-password = "{pg['password']}"
-dbname = "{db_select}"
-"""
-        st.code(dsn_toml.strip(), language="toml")
-        st.info("Copy and paste this block into your `.streamlit/secrets.toml` to use this database in your apps.")
-        st.caption("Tip: You may want to use a less-privileged user than `postgres` for most app connections.")
-
-        st.markdown("#### Example Python connection code:")
-        st.code(
-            f"""
-import streamlit as st
-import psycopg2
-
-pg = st.secrets["{section}"]
-conn = psycopg2.connect(
-    dbname=pg["dbname"],
-    user=pg["user"],
-    password=pg["password"],
-    host=pg["host"],
-    port=pg["port"]
-)
-# Use conn as needed...
-""",
-            language="python"
-        )
+if __name__ == "__main__":
+    main()
