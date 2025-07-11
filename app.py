@@ -5,6 +5,7 @@ import re
 st.set_page_config(page_title="PostgreSQL Admin Portal", layout="wide")
 pg = st.secrets["superuser"]
 
+# --- Helper functions ---
 def get_conn(dbname=None):
     return psycopg2.connect(
         dbname=dbname or pg["dbname"],
@@ -35,11 +36,21 @@ def get_schema(dbname):
         cur.close()
         return rows
 
-# --- Sidebar Navigation ---
-page = st.sidebar.radio(
-    "Choose a page:",
-    ["Create Database", "Edit Database", "Connection Info"]
-)
+# --- Sidebar Button Navigation ---
+st.sidebar.title("Admin Navigation")
+PAGES = ["Create Database", "Edit Database", "Connection Info"]
+
+if "active_page" not in st.session_state:
+    st.session_state.active_page = PAGES[0]
+
+for page in PAGES:
+    if st.sidebar.button(page, key=page):
+        st.session_state.active_page = page
+
+st.sidebar.markdown("---")
+st.sidebar.caption("Powered by Streamlit & PostgreSQL")
+
+page = st.session_state.active_page
 
 # --- Create Database Page ---
 if page == "Create Database":
@@ -75,7 +86,6 @@ if page == "Create Database":
 # --- Edit Database Page ---
 elif page == "Edit Database":
     st.title("PostgreSQL Admin Portal - Edit Database")
-
     dbs = list_databases()
     db_select = st.selectbox("Choose a database to edit:", dbs)
 
@@ -124,7 +134,6 @@ elif page == "Connection Info":
 
     if db_select:
         st.subheader(f"Secrets.toml snippet for `{db_select}`")
-        # Use current host, port, and prompt for user/password if you want
         section = db_select
         dsn_toml = f"""
 [{section}]
