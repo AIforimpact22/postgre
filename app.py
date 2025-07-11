@@ -3,18 +3,21 @@ import psycopg2
 
 st.title("PostgreSQL Admin Console (using secrets.toml)")
 
-# --- Connect automatically with superuser credentials from secrets ---
+# --- Connect using superuser credentials from secrets ---
 pg = st.secrets["superuser"]
 
 @st.cache_resource(show_spinner=False)
 def get_conn():
-    return psycopg2.connect(
+    # autocommit needed for CREATE DATABASE!
+    conn = psycopg2.connect(
         dbname=pg["dbname"],
         user=pg["user"],
         password=pg["password"],
         host=pg["host"],
         port=pg["port"]
     )
+    conn.autocommit = True
+    return conn
 
 try:
     conn = get_conn()
@@ -25,19 +28,29 @@ except Exception as e:
 
 # --- SQL Command Window ---
 st.subheader("SQL Command Window")
-sql = st.text_area("Enter SQL (e.g., CREATE DATABASE ..., CREATE TABLE ...)", height=200)
+sql = st.text_area(
+    "Enter SQL (e.g., CREATE DATABASE ..., CREATE TABLE ...)", 
+    height=200, 
+    placeholder="Write your SQL here..."
+)
 
 if st.button("Execute SQL"):
     try:
         cur = conn.cursor()
-        cur.execute(sql)
-        # Fetch results if any (e.g. SELECT)
-        if cur.description:
-            rows = cur.fetchall()
-            columns = [desc[0] for desc in cur.description]
-            st.dataframe(rows, columns=columns)
+        # If more than one statement is entered, split by ';'
+        stmts = [stmt.strip() for stmt in sql.split(";") if stmt.strip()]
+        results = []
+        for stmt in stmts:
+            cur.execute(stmt)
+            if cur.description:  # SELECT or RETURNING
+                rows = cur.fetchall()
+                columns = [desc[0] for desc in cur.description]
+                results.append((rows, columns))
+        if results:
+            for i, (rows, columns) in enumerate(results):
+                st.write(f"Result of statement #{i+1}:")
+                st.dataframe(rows, columns=columns)
         else:
-            conn.commit()
             st.success("SQL executed successfully!")
         cur.close()
     except Exception as e:
