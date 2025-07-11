@@ -74,10 +74,11 @@ if page == "Create Database":
             st.error("Invalid database name. Use only letters, numbers, and underscores, starting with a letter.")
         else:
             try:
+                # Fix: Use autocommit for CREATE DATABASE
                 with get_conn() as conn:
+                    conn.autocommit = True
                     cur = conn.cursor()
                     cur.execute(f'CREATE DATABASE "{db_name}";')
-                    conn.commit()
                     cur.close()
                 st.success(f'Database `{db_name}` created successfully!')
 
