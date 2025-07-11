@@ -3,11 +3,9 @@ import psycopg2
 import re
 
 st.set_page_config(page_title="PostgreSQL Admin Portal", layout="wide")
-
 pg = st.secrets["superuser"]
 
 def get_conn(dbname=None):
-    # Use the requested db or fall back to superuser/admin db
     return psycopg2.connect(
         dbname=dbname or pg["dbname"],
         user=pg["user"],
@@ -37,10 +35,13 @@ def get_schema(dbname):
         cur.close()
         return rows
 
-# ───── Sidebar Navigation ─────
-page = st.sidebar.radio("Choose a page:", ["Create Database", "Edit Database"])
+# --- Sidebar Navigation ---
+page = st.sidebar.radio(
+    "Choose a page:",
+    ["Create Database", "Edit Database", "Connection Info"]
+)
 
-# ───── Create Database Page ─────
+# --- Create Database Page ---
 if page == "Create Database":
     st.title("PostgreSQL Admin Portal - Create Database")
     db_name = st.text_input(
@@ -71,7 +72,7 @@ if page == "Create Database":
         st.write("Available databases:")
         st.table(dbs)
 
-# ───── Edit Database Page ─────
+# --- Edit Database Page ---
 elif page == "Edit Database":
     st.title("PostgreSQL Admin Portal - Edit Database")
 
@@ -114,3 +115,44 @@ elif page == "Edit Database":
                         cur.close()
                 except Exception as e:
                     st.error(f"Error: {e}")
+
+# --- Connection Info Page ---
+elif page == "Connection Info":
+    st.title("PostgreSQL Admin Portal - Connection Info")
+    dbs = list_databases()
+    db_select = st.selectbox("Choose a database for connection info:", dbs, key="conninfo")
+
+    if db_select:
+        st.subheader(f"Secrets.toml snippet for `{db_select}`")
+        # Use current host, port, and prompt for user/password if you want
+        section = db_select
+        dsn_toml = f"""
+[{section}]
+host = "{pg['host']}"
+port = {pg['port']}
+user = "{pg['user']}"
+password = "{pg['password']}"
+dbname = "{db_select}"
+"""
+        st.code(dsn_toml.strip(), language="toml")
+        st.info("Copy and paste this block into your `.streamlit/secrets.toml` to use this database in your apps.")
+        st.caption("Tip: You may want to use a less-privileged user than `postgres` for most app connections.")
+
+        st.markdown("#### Example Python connection code:")
+        st.code(
+            f"""
+import streamlit as st
+import psycopg2
+
+pg = st.secrets["{section}"]
+conn = psycopg2.connect(
+    dbname=pg["dbname"],
+    user=pg["user"],
+    password=pg["password"],
+    host=pg["host"],
+    port=pg["port"]
+)
+# Use conn as needed...
+""",
+            language="python"
+        )
