@@ -39,9 +39,43 @@ def get_schema(dbname):
         rows = cur.fetchall()
     return rows
 
+def get_tables(dbname):
+    with get_conn(dbname) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema='public' AND table_type='BASE TABLE';"
+        )
+        tables = [row[0] for row in cur.fetchall()]
+    return tables
+
+def get_columns(dbname, table):
+    with get_conn(dbname) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=%s
+            ORDER BY ordinal_position;
+            """,
+            (table,)
+        )
+        cols = cur.fetchall()
+    return cols
+
+def insert_row(dbname, table, data):
+    with get_conn(dbname) as conn:
+        cur = conn.cursor()
+        columns = ", ".join(data.keys())
+        placeholders = ", ".join(["%s"] * len(data))
+        sql = f'INSERT INTO "{table}" ({columns}) VALUES ({placeholders})'
+        cur.execute(sql, list(data.values()))
+        conn.commit()
+
 # ───────────────── Sidebar nav ─────────────────
 st.sidebar.title("Admin Navigation")
-PAGES = ["Create Database", "Edit Database", "Connection Info", "Delete"]
+PAGES = ["Create Database", "Edit Database", "Connection Info", "Delete", "Manual Data Entry"]
 
 if "active_page" not in st.session_state:
     st.session_state.active_page = PAGES[0]
@@ -189,3 +223,48 @@ elif page == "Delete":
             st.experimental_rerun()
     else:
         st.info("No user databases to delete.")
+
+# ──────────────── Manual Data Entry ─────────────
+elif page == "Manual Data Entry":
+    st.title("Manual Data Entry")
+    dbs = list_databases()
+    db_select = st.selectbox("Choose a database:", dbs, key="entrydb")
+    table = None
+    columns = []
+
+    if db_select:
+        tables = get_tables(db_select)
+        table = st.selectbox("Choose a table:", tables, key="entrytable")
+        if table:
+            columns = get_columns(db_select, table)
+            st.write(f"Columns in `{table}`: {[col[0] for col in columns]}")
+
+            # Build a data entry form for all columns except SERIAL/identity columns
+            with st.form(key="entry_form"):
+                data = {}
+                for col_name, data_type in columns:
+                    # Skip SERIAL, identity, or auto-incremented fields (basic approach)
+                    if data_type.lower() in ("integer", "bigint") and col_name.endswith("id"):
+                        continue
+                    value = st.text_input(f"{col_name} ({data_type})", key=col_name)
+                    data[col_name] = value
+                submit = st.form_submit_button("Insert Row")
+
+                if submit:
+                    # Try conversion (handle integer/float types)
+                    for idx, (col_name, data_type) in enumerate(columns):
+                        val = data[col_name]
+                        if val == "":
+                            data[col_name] = None
+                        elif data_type in ("integer", "bigint"):
+                            data[col_name] = int(val)
+                        elif data_type == "double precision":
+                            data[col_name] = float(val)
+                        # else keep as string
+                    # Remove keys where value is None
+                    data_cleaned = {k: v for k, v in data.items() if v is not None}
+                    try:
+                        insert_row(db_select, table, data_cleaned)
+                        st.success(f"Inserted into `{table}`: {data_cleaned}")
+                    except Exception as e:
+                        st.error(f"Insert failed: {e}")
