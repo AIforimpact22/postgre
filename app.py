@@ -5,7 +5,7 @@ import re
 st.set_page_config(page_title="PostgreSQL Admin Portal", layout="wide")
 pg = st.secrets["superuser"]
 
-# --- Helper functions ---
+# ─────────────────── Helpers ───────────────────
 def get_conn(dbname=None):
     return psycopg2.connect(
         dbname=dbname or pg["dbname"],
@@ -18,207 +18,174 @@ def get_conn(dbname=None):
 def list_databases():
     with get_conn() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname;")
-        dbs = [db[0] for db in cur.fetchall()]
-        cur.close()
-        return dbs
+        cur.execute(
+            "SELECT datname FROM pg_database "
+            "WHERE datistemplate = false ORDER BY datname;"
+        )
+        dbs = [r[0] for r in cur.fetchall()]
+    return dbs
 
 def get_schema(dbname):
     with get_conn(dbname) as conn:
         cur = conn.cursor()
-        cur.execute("""
+        cur.execute(
+            """
             SELECT table_name, column_name, data_type
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-            ORDER BY table_name, ordinal_position;
-        """)
+            FROM   information_schema.columns
+            WHERE  table_schema = 'public'
+            ORDER  BY table_name, ordinal_position;
+            """
+        )
         rows = cur.fetchall()
-        cur.close()
-        return rows
+    return rows
 
-# --- Sidebar Button Navigation ---
+# ───────────────── Sidebar nav ─────────────────
 st.sidebar.title("Admin Navigation")
 PAGES = ["Create Database", "Edit Database", "Connection Info", "Delete"]
 
 if "active_page" not in st.session_state:
     st.session_state.active_page = PAGES[0]
 
-for page in PAGES:
-    if st.sidebar.button(page, key=page):
-        st.session_state.active_page = page
+for p in PAGES:
+    if st.sidebar.button(p, key=p):
+        st.session_state.active_page = p
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Powered by Streamlit & PostgreSQL")
 
 page = st.session_state.active_page
 
-# --- Create Database Page ---
+# ───────────────── Create DB ────────────────────
 if page == "Create Database":
-    st.title("PostgreSQL Admin Portal - Create Database")
-    st.markdown("#### 1. Database Name")
+    st.title("Create Database")
     db_name = st.text_input(
-        "New database name (letters, numbers, underscores only)",
+        "Database name (letters, numbers, underscores only)",
         max_chars=32,
-        help="Only letters, numbers, and underscores (_). Must start with a letter."
+        help="Must start with a letter."
     )
-    db_valid = bool(re.match(r'^[A-Za-z][A-Za-z0-9_]*$', db_name))
-    st.markdown("#### 2. Optional: SQL to run in new database")
-    sql = st.text_area(
-        "SQL (optional). Example: CREATE TABLE, INSERT INTO, etc.",
-        height=120,
-        key="create_db_sql"
+    db_valid = bool(re.match(r"^[A-Za-z][A-Za-z0-9_]*$", db_name))
+
+    sql_extra = st.text_area(
+        "Optional SQL to run *inside* the new database "
+        "(e.g. CREATE TABLE ...)", height=140
     )
 
     if st.button("Create Database and Run SQL"):
         if not db_valid:
-            st.error("Invalid database name. Use only letters, numbers, and underscores, starting with a letter.")
+            st.error("Invalid name. Use letters, numbers, underscores; start with a letter.")
         else:
             try:
-                # Fix: Use autocommit for CREATE DATABASE
-                with get_conn() as conn:
-                    conn.autocommit = True
-                    cur = conn.cursor()
+                # ---- CREATE DATABASE (autocommit) ----
+                conn = get_conn()
+                conn.autocommit = True
+                with conn.cursor() as cur:
                     cur.execute(f'CREATE DATABASE "{db_name}";')
-                    cur.close()
-                st.success(f'Database `{db_name}` created successfully!')
+                conn.close()
+                st.success(f"Database `{db_name}` created.")
 
-                if sql.strip():
-                    with get_conn(db_name) as newdb_conn:
-                        newdb_cur = newdb_conn.cursor()
-                        newdb_cur.execute(sql)
-                        if newdb_cur.description:
-                            rows = newdb_cur.fetchall()
-                            columns = [desc[0] for desc in newdb_cur.description]
-                            st.dataframe(rows, columns=columns)
-                        else:
-                            newdb_conn.commit()
-                        newdb_cur.close()
-                    st.success("SQL executed in new database!")
+                # ---- optional SQL in the new DB ----
+                if sql_extra.strip():
+                    with get_conn(db_name) as new_conn:
+                        with new_conn.cursor() as cur:
+                            cur.execute(sql_extra)
+                            if cur.description:
+                                rows = cur.fetchall()
+                                cols = [d[0] for d in cur.description]
+                                st.dataframe(rows, columns=cols)
+                            else:
+                                new_conn.commit()
+                    st.success("Optional SQL executed inside new DB.")
             except psycopg2.errors.DuplicateDatabase:
                 st.warning(f"Database `{db_name}` already exists.")
             except Exception as e:
                 st.error(f"Error: {e}")
 
     if st.button("List All Databases"):
-        dbs = list_databases()
-        st.write("Available databases:")
-        st.table(dbs)
+        st.table(list_databases())
 
-# --- Edit Database Page ---
+# ───────────────── Edit DB ──────────────────────
 elif page == "Edit Database":
-    st.title("PostgreSQL Admin Portal - Edit Database")
+    st.title("Edit Database")
     dbs = list_databases()
-    db_select = st.selectbox("Choose a database to edit:", dbs)
+    db_select = st.selectbox("Choose a database:", dbs)
 
     if db_select:
-        st.subheader(f"Schema for `{db_select}`")
-        schema = get_schema(db_select)
-        if schema:
-            schema_dict = {}
-            for tbl, col, typ in schema:
-                schema_dict.setdefault(tbl, []).append(f"{col} ({typ})")
-            for table, cols in schema_dict.items():
-                st.markdown(f"**{table}**")
+        st.subheader(f"Schema of `{db_select}`")
+        schema_rows = get_schema(db_select)
+        if schema_rows:
+            tbl_map = {}
+            for t, c, d in schema_rows:
+                tbl_map.setdefault(t, []).append(f"{c} ({d})")
+            for t, cols in tbl_map.items():
+                st.markdown(f"**{t}**")
                 st.write(", ".join(cols))
         else:
-            st.info("No tables in this database yet.")
+            st.info("No tables yet.")
 
         st.subheader("SQL Editor")
-        sql = st.text_area(
-            f"Run SQL in `{db_select}` (e.g., CREATE TABLE, SELECT, etc.):",
-            height=120,
-            key="sql_editor"
-        )
+        sql_cmd = st.text_area("SQL to run in this database:", height=140)
         if st.button("Run SQL", key="run_sql"):
-            with st.spinner("Running SQL..."):
+            with st.spinner("Running…"):
                 try:
                     with get_conn(db_select) as conn:
-                        cur = conn.cursor()
-                        cur.execute(sql)
-                        if cur.description:
-                            rows = cur.fetchall()
-                            columns = [desc[0] for desc in cur.description]
-                            st.dataframe(rows, columns=columns)
-                            st.success("Query executed and results shown above.")
-                        else:
-                            conn.commit()
-                            st.success("SQL command executed successfully!")
-                        cur.close()
+                        with conn.cursor() as cur:
+                            cur.execute(sql_cmd)
+                            if cur.description:
+                                rows = cur.fetchall()
+                                cols = [d[0] for d in cur.description]
+                                st.dataframe(rows, columns=cols)
+                            else:
+                                conn.commit()
+                                st.success("Command executed.")
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error(e)
 
-# --- Connection Info Page ---
+# ───────────────── Connection Info ─────────────
 elif page == "Connection Info":
-    st.title("PostgreSQL Admin Portal - Connection Info")
+    st.title("Connection Info")
     dbs = list_databases()
-    db_select = st.selectbox("Choose a database for connection info:", dbs, key="conninfo")
+    db_select = st.selectbox("Choose DB:", dbs, key="conninfo")
 
     if db_select:
-        st.subheader(f"Secrets.toml snippet for `{db_select}`")
-        section = db_select
-        dsn_toml = f"""
-[{section}]
+        st.subheader("`.streamlit/secrets.toml` snippet")
+        toml_block = f"""
+[{db_select}]
 host = "{pg['host']}"
 port = {pg['port']}
 user = "{pg['user']}"
 password = "{pg['password']}"
 dbname = "{db_select}"
 """
-        st.code(dsn_toml.strip(), language="toml")
-        st.info("Copy and paste this block into your `.streamlit/secrets.toml` to use this database in your apps.")
-        st.caption("Tip: You may want to use a less-privileged user than `postgres` for most app connections.")
+        st.code(toml_block.strip(), language="toml")
+        st.caption("Copy-paste this into your secrets file.")
 
-        st.markdown("#### Example Python connection code:")
-        st.code(
-            f"""
-import streamlit as st
-import psycopg2
-
-pg = st.secrets["{section}"]
-conn = psycopg2.connect(
-    dbname=pg["dbname"],
-    user=pg["user"],
-    password=pg["password"],
-    host=pg["host"],
-    port=pg["port"]
-)
-# Use conn as needed...
-""",
-            language="python"
-        )
-
-# --- Delete Database Page ---
+# ───────────────── Delete DB ────────────────────
 elif page == "Delete":
-    st.title("PostgreSQL Admin Portal - Delete Database")
-    dbs = list_databases()
-    protected_dbs = {"postgres", "template0", "template1"}
-    deletable_dbs = [db for db in dbs if db not in protected_dbs]
+    st.title("Delete Database")
+    protected = {"postgres", "template0", "template1"}
+    deletable = [d for d in list_databases() if d not in protected]
 
-    if deletable_dbs:
-        db_select = st.selectbox("Choose a database to delete:", deletable_dbs, key="delete_db")
+    if deletable:
+        db_select = st.selectbox("Database to delete:", deletable)
         confirm = st.checkbox(
-            f"⚠️ Yes, I am sure I want to permanently delete `{db_select}`. This cannot be undone.",
-            key="delete_confirm"
+            f"⚠️ Permanently delete `{db_select}`?", key="confirm_del"
         )
-        if st.button("Delete Database", key="do_delete"):
+        if st.button("Delete Database"):
             if not confirm:
-                st.warning("Please check the confirmation box before deleting.")
+                st.warning("Please confirm first.")
             else:
-                with st.spinner("Deleting database..."):
-                    try:
-                        with get_conn() as conn:
-                            conn.autocommit = True  # Required for DROP DATABASE
-                            cur = conn.cursor()
-                            cur.execute(f'DROP DATABASE "{db_select}";')
-                            st.success(f"Database `{db_select}` deleted successfully!")
-                            cur.close()
-                    except psycopg2.errors.InvalidCatalogName:
-                        st.warning(f"Database `{db_select}` does not exist.")
-                    except psycopg2.errors.ObjectInUse:
-                        st.error(f"Database `{db_select}` is in use. Please disconnect all users and try again.")
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-        if st.button("Refresh List", key="refresh_delete"):
+                try:
+                    conn = get_conn()
+                    conn.autocommit = True
+                    with conn.cursor() as cur:
+                        cur.execute(f'DROP DATABASE "{db_select}";')
+                    conn.close()
+                    st.success(f"`{db_select}` deleted.")
+                except psycopg2.errors.ObjectInUse:
+                    st.error("Database is in use. Disconnect users then retry.")
+                except Exception as e:
+                    st.error(e)
+        if st.button("Refresh list"):
             st.experimental_rerun()
     else:
-        st.info("No databases available for deletion.")
+        st.info("No user databases to delete.")
