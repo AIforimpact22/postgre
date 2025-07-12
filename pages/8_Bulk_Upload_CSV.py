@@ -2,11 +2,14 @@
 """
 Bulk-upload a CSV into any PostgreSQL table (fast COPY).
 
- • Lets you pick schema.table
- • Validates that CSV headers exist in the target table
- • Uses psycopg2.sql to quote identifiers properly
- • Opens the COPY connection with auto_commit=True so the ACCESS EXCLUSIVE
-   lock is released the moment the statement finishes (no lingering locks)
+Key points
+──────────
+• Lets you pick schema.table
+• Validates that CSV headers exist in the target table
+• Runs COPY in auto-commit mode → no lingering locks
+• New: “Force-unlock & upload” button cancels / terminates sessions that
+  still hold an ACCESS EXCLUSIVE lock on the table (e.g. from a forgotten
+  TRUNCATE or failed COPY) before retrying the upload.
 """
 
 from __future__ import annotations
@@ -23,7 +26,6 @@ from db_utils import list_databases, get_conn
 
 # ───────────────────────────── helpers ──────────────────────────────
 def list_schemata_tables(db: str) -> List[str]:
-    """Return ['public.item', 'inventory.Item', …] excluding system schemas."""
     q = """
         SELECT table_schema, table_name
         FROM information_schema.tables
@@ -46,6 +48,50 @@ def get_table_columns(db: str, schema: str, table: str) -> List[str]:
         cur.execute(q, (schema, table))
         return [r[0] for r in cur.fetchall()]
 
+def force_unlock_table(db: str, schema: str, table: str) -> List[int]:
+    """
+    Cancel (then terminate, if needed) every session that still holds a lock
+    on schema.table. Returns list of pids it acted on.
+    """
+    pid_list: List[int] = []
+    look_sql = """
+        SELECT l.pid
+        FROM pg_locks  l
+        JOIN pg_class  c ON c.oid = l.relation
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s
+          AND c.relname = %s
+          AND l.pid <> pg_backend_pid();
+    """
+    with get_conn(db, auto_commit=True) as conn, conn.cursor() as cur:
+        cur.execute(look_sql, (schema, table))
+        pids = [r[0] for r in cur.fetchall()]
+
+        for pid in pids:
+            cur.execute("SELECT pg_cancel_backend(%s);", (pid,))
+            cur.execute(look_sql, (schema, table))
+            still_locked = cur.fetchone() is not None
+            if still_locked:
+                cur.execute("SELECT pg_terminate_backend(%s);", (pid,))
+            pid_list.append(pid)
+    return pid_list
+
+def copy_csv(conn, df: pd.DataFrame, schema: str, tbl: str):
+    """Execute COPY ... FROM STDIN using the provided connection (autocommit)."""
+    buf = io.StringIO()
+    df.to_csv(buf, index=False, header=False)
+    buf.seek(0)
+
+    copy_sql = sql.SQL(
+        "COPY {} ({}) FROM STDIN WITH (FORMAT csv)"
+    ).format(
+        sql.Identifier(schema, tbl),
+        sql.SQL(", ").join(map(sql.Identifier, df.columns)),
+    )
+
+    with conn.cursor() as cur:
+        cur.copy_expert(copy_sql, buf)
+
 # ─────────────────────────────── UI ────────────────────────────────
 st.title("📥 Bulk CSV Upload")
 
@@ -63,7 +109,7 @@ if not tbl_choice:
     st.stop()
 
 schema, tbl = tbl_choice.split(".", 1)
-tbl_cols     = get_table_columns(db, schema, tbl)
+tbl_cols = get_table_columns(db, schema, tbl)
 st.write(f"Columns in **{tbl_choice}**: {', '.join(tbl_cols)}")
 
 csv_file = st.file_uploader("CSV file to upload", type=["csv"])
@@ -86,34 +132,32 @@ if missing:
 
 st.success(f"CSV looks good · {len(df)} rows · {len(df.columns)} columns")
 
-# ────────────────────────── COPY to PostgreSQL ─────────────────────────
-st.radio("Insert mode", ["Append"], index=0)
+# ──────────────────────── Upload buttons ──────────────────────────
+col1, col2 = st.columns(2)
+with col1:
+    run_upload = st.button("🚀 Upload")
+with col2:
+    force_upload = st.button("🛠 Force-unlock & upload")
 
-if st.button("🚀 Upload to database"):
+def do_upload(force: bool = False):
+    try:
+        if force:
+            pids = force_unlock_table(db, schema, tbl)
+            st.info(f"Cancelled/terminated blocking pids: {pids or 'none found'}")
 
-    with st.spinner("Copying data …"):
-        # buffer with data rows only (no header)
-        buf = io.StringIO()
-        df.to_csv(buf, index=False, header=False)
-        buf.seek(0)
+        with st.spinner("Copying data …"):
+            with get_conn(db, auto_commit=True) as conn:
+                copy_csv(conn, df, schema, tbl)
+        st.success(f"Inserted {len(df)} rows into **{tbl_choice}** 🎉")
 
-        # COPY  "schema"."table" ("c1","c2",…) FROM STDIN WITH (FORMAT CSV)
-        copy_sql = sql.SQL(
-            "COPY {} ({}) FROM STDIN WITH (FORMAT csv)"
-        ).format(
-            sql.Identifier(schema, tbl),
-            sql.SQL(", ").join(map(sql.Identifier, df.columns)),
-        )
+    except psycopg2.errors.LockNotAvailable:
+        st.error("Table is locked by another session. Try 'Force-unlock & upload'.")
+    except psycopg2.Error as e:
+        st.error(f"Database error: {e.pgerror or e}")
+    except Exception as e:
+        st.error(str(e))
 
-        try:
-            # auto_commit=True ensures the COPY lock is released as soon
-            # as the statement completes — no lingering ACCESS EXCLUSIVE lock
-            with get_conn(db, auto_commit=True) as conn, conn.cursor() as cur:
-                cur.copy_expert(copy_sql, buf)
-
-            st.success(f"Inserted {len(df)} rows into **{tbl_choice}** 🎉")
-
-        except psycopg2.Error as e:
-            st.error(f"Database error: {e.pgerror or e}")
-        except Exception as e:
-            st.error(str(e))
+if run_upload:
+    do_upload(force=False)
+elif force_upload:
+    do_upload(force=True)
