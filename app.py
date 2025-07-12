@@ -187,7 +187,7 @@ elif page == "Browse Tables":
             if table_select:
                 cols = [c[0] for c in get_columns(db_select, table_select)]
                 limit = st.number_input(
-                    "Rows to display", min_value=1, max_value=1000, value=50
+                    "Rows to display", min_value=1, max_value=20000, value=50
                 )
                 with get_conn(db_select) as conn:
                     cur = conn.cursor()
