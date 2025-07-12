@@ -1,28 +1,39 @@
 # app.py
 import streamlit as st
 
-# ───────── page config ─────────
-st.set_page_config(page_title="PostgreSQL Admin Portal", layout="wide")
+# ───────────────────────────────
+# Page-wide settings
+# ───────────────────────────────
+st.set_page_config(
+    page_title="PostgreSQL Admin Portal",
+    layout="wide",
+    initial_sidebar_state="collapsed",   # keep sidebar hidden until unlocked
+)
 
-# ───────── PIN gate ─────────
-CORRECT_PIN = st.secrets["auth"]["pin"]        # expected "1212"
+# ───────────────────────────────
+# PIN-gate logic
+# ───────────────────────────────
+PIN = st.secrets["pin"]          # expect "1212" in .streamlit/secrets.toml
 
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
-    st.title("🔒 Enter PIN")
-    pin_input = st.text_input("PIN", type="password", on_change=lambda: None)
+    st.title("🔒 Locked")
+    st.write("Enter PIN to access the admin portal.")
+    pin_entry = st.text_input("PIN", type="password")
 
     if st.button("Unlock"):
-        if pin_input == CORRECT_PIN:
+        if pin_entry == PIN:
             st.session_state.authenticated = True
             st.experimental_rerun()
         else:
             st.error("Incorrect PIN")
-    st.stop()                                  # block rest of UI until authenticated
+    st.stop()                   # ⇦ absolutely nothing below this line executes
 
-# ───────── main landing page ─────────
+# ───────────────────────────────
+# Main landing content (shown only after PIN)
+# ───────────────────────────────
 st.title("PostgreSQL Admin Portal 🐘")
 st.markdown(
     """
