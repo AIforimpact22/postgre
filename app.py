@@ -7,25 +7,24 @@ import streamlit as st
 st.set_page_config(
     page_title="PostgreSQL Admin Portal",
     layout="wide",
-    initial_sidebar_state="collapsed",   # keep sidebar hidden until unlocked
+    initial_sidebar_state="collapsed",   # hide sidebar until unlocked
 )
 
 # ──────────────────────────────────────────────
-# Resolve expected PIN (robust to missing secrets)
+# Resolve expected PIN (fallback to "1212")
 # ──────────────────────────────────────────────
 DEFAULT_PIN = "1212"
 
 if "auth" in st.secrets and "pin" in st.secrets["auth"]:
     EXPECTED_PIN = st.secrets["auth"]["pin"]
-elif "pin" in st.secrets:                # root-level key
+elif "pin" in st.secrets:
     EXPECTED_PIN = st.secrets["pin"]
 else:
     EXPECTED_PIN = DEFAULT_PIN
     st.sidebar.warning(
-        "⚠️ No PIN found in `secrets.toml`; "
-        f"using default PIN **{DEFAULT_PIN}**.\n\n"
-        "Add one with either:\n"
-        '`[auth] pin = "1212"`  or  `pin = "1212"`',
+        "⚠️ No PIN found in `secrets.toml`; using default "
+        f'PIN **"{DEFAULT_PIN}"**.  '
+        "Add one under `[auth] pin = \"1212\"` or `pin = \"1212\"`.",
     )
 
 # ──────────────────────────────────────────────
@@ -41,10 +40,11 @@ if not st.session_state.authenticated:
     if st.button("Unlock"):
         if pin_entry == EXPECTED_PIN:
             st.session_state.authenticated = True
-            st.experimental_rerun()
+            # No need for st.experimental_rerun(); the button click
+            # already triggers a rerun of the script with new state.
         else:
             st.error("Incorrect PIN")
-    st.stop()                 # NOTHING below executes until unlocked
+    st.stop()  # ⬅️ block anything below until authenticated
 
 # ──────────────────────────────────────────────
 # Main landing page (visible only after auth)
