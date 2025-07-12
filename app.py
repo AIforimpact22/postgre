@@ -22,8 +22,7 @@ def list_databases():
             "SELECT datname FROM pg_database "
             "WHERE datistemplate = false ORDER BY datname;"
         )
-        dbs = [r[0] for r in cur.fetchall()]
-    return dbs
+        return [r[0] for r in cur.fetchall()]
 
 def get_schema(dbname):
     with get_conn(dbname) as conn:
@@ -36,8 +35,7 @@ def get_schema(dbname):
             ORDER  BY table_name, ordinal_position;
             """
         )
-        rows = cur.fetchall()
-    return rows
+        return cur.fetchall()
 
 def get_tables(dbname):
     with get_conn(dbname) as conn:
@@ -46,8 +44,7 @@ def get_tables(dbname):
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema='public' AND table_type='BASE TABLE';"
         )
-        tables = [row[0] for row in cur.fetchall()]
-    return tables
+        return [row[0] for row in cur.fetchall()]
 
 def get_columns(dbname, table):
     with get_conn(dbname) as conn:
@@ -61,21 +58,27 @@ def get_columns(dbname, table):
             """,
             (table,)
         )
-        cols = cur.fetchall()
-    return cols
+        return cur.fetchall()
 
 def insert_row(dbname, table, data):
     with get_conn(dbname) as conn:
         cur = conn.cursor()
-        columns = ", ".join(data.keys())
-        placeholders = ", ".join(["%s"] * len(data))
-        sql = f'INSERT INTO "{table}" ({columns}) VALUES ({placeholders})'
+        cols = ", ".join(data.keys())
+        vals_placeholders = ", ".join(["%s"] * len(data))
+        sql = f'INSERT INTO "{table}" ({cols}) VALUES ({vals_placeholders})'
         cur.execute(sql, list(data.values()))
         conn.commit()
 
 # ───────────────── Sidebar nav ─────────────────
 st.sidebar.title("Admin Navigation")
-PAGES = ["Create Database", "Edit Database", "Connection Info", "Delete", "Manual Data Entry"]
+PAGES = [
+    "Create Database",
+    "Edit Database",
+    "Browse Tables",         # ← NEW PAGE
+    "Connection Info",
+    "Delete",
+    "Manual Data Entry"
+]
 
 if "active_page" not in st.session_state:
     st.session_state.active_page = PAGES[0]
@@ -94,14 +97,12 @@ if page == "Create Database":
     st.title("Create Database")
     db_name = st.text_input(
         "Database name (letters, numbers, underscores only)",
-        max_chars=32,
-        help="Must start with a letter."
+        max_chars=32, help="Must start with a letter."
     )
     db_valid = bool(re.match(r"^[A-Za-z][A-Za-z0-9_]*$", db_name))
-
     sql_extra = st.text_area(
-        "Optional SQL to run *inside* the new database "
-        "(e.g. CREATE TABLE ...)", height=140
+        "Optional SQL to run *inside* the new database (e.g. CREATE TABLE ...)",
+        height=140
     )
 
     if st.button("Create Database and Run SQL"):
@@ -109,15 +110,12 @@ if page == "Create Database":
             st.error("Invalid name. Use letters, numbers, underscores; start with a letter.")
         else:
             try:
-                # ---- CREATE DATABASE (autocommit) ----
                 conn = get_conn()
                 conn.autocommit = True
                 with conn.cursor() as cur:
                     cur.execute(f'CREATE DATABASE "{db_name}";')
                 conn.close()
                 st.success(f"Database `{db_name}` created.")
-
-                # ---- optional SQL in the new DB ----
                 if sql_extra.strip():
                     with get_conn(db_name) as new_conn:
                         with new_conn.cursor() as cur:
@@ -174,12 +172,38 @@ elif page == "Edit Database":
                 except Exception as e:
                     st.error(e)
 
+# ───────────────── Browse Tables ───────────────
+elif page == "Browse Tables":
+    st.title("Browse Tables")
+    dbs = list_databases()
+    db_select = st.selectbox("Select a database:", dbs, key="browse_db")
+
+    if db_select:
+        tables = get_tables(db_select)
+        if tables:
+            table_select = st.selectbox("Select a table:", tables, key="browse_table")
+            if table_select:
+                cols = [c[0] for c in get_columns(db_select, table_select)]
+                limit = st.number_input(
+                    "Rows to display", min_value=1, max_value=1000, value=50
+                )
+                with get_conn(db_select) as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        f'SELECT * FROM "{table_select}" LIMIT %s;',
+                        (limit,)
+                    )
+                    rows = cur.fetchall()
+                st.subheader(f"`{table_select}` preview")
+                st.dataframe(rows, columns=cols)
+        else:
+            st.info("No tables found in this database.")
+
 # ───────────────── Connection Info ─────────────
 elif page == "Connection Info":
     st.title("Connection Info")
     dbs = list_databases()
     db_select = st.selectbox("Choose DB:", dbs, key="conninfo")
-
     if db_select:
         st.subheader("`.streamlit/secrets.toml` snippet")
         toml_block = f"""
@@ -229,30 +253,22 @@ elif page == "Manual Data Entry":
     st.title("Manual Data Entry")
     dbs = list_databases()
     db_select = st.selectbox("Choose a database:", dbs, key="entrydb")
-    table = None
-    columns = []
-
     if db_select:
         tables = get_tables(db_select)
         table = st.selectbox("Choose a table:", tables, key="entrytable")
         if table:
-            columns = get_columns(db_select, table)
-            st.write(f"Columns in `{table}`: {[col[0] for col in columns]}")
-
-            # Build a data entry form for all columns except SERIAL/identity columns
+            cols = get_columns(db_select, table)
+            st.write(f"Columns in `{table}`: {[c[0] for c in cols]}")
             with st.form(key="entry_form"):
                 data = {}
-                for col_name, data_type in columns:
-                    # Skip SERIAL, identity, or auto-incremented fields (basic approach)
+                for col_name, data_type in cols:
                     if data_type.lower() in ("integer", "bigint") and col_name.endswith("id"):
                         continue
-                    value = st.text_input(f"{col_name} ({data_type})", key=col_name)
-                    data[col_name] = value
+                    data[col_name] = st.text_input(f"{col_name} ({data_type})", key=col_name)
                 submit = st.form_submit_button("Insert Row")
-
                 if submit:
-                    # Try conversion (handle integer/float types)
-                    for idx, (col_name, data_type) in enumerate(columns):
+                    # convert types
+                    for col_name, data_type in cols:
                         val = data[col_name]
                         if val == "":
                             data[col_name] = None
@@ -260,11 +276,9 @@ elif page == "Manual Data Entry":
                             data[col_name] = int(val)
                         elif data_type == "double precision":
                             data[col_name] = float(val)
-                        # else keep as string
-                    # Remove keys where value is None
-                    data_cleaned = {k: v for k, v in data.items() if v is not None}
+                    cleaned = {k: v for k, v in data.items() if v is not None}
                     try:
-                        insert_row(db_select, table, data_cleaned)
-                        st.success(f"Inserted into `{table}`: {data_cleaned}")
+                        insert_row(db_select, table, cleaned)
+                        st.success(f"Inserted into `{table}`: {cleaned}")
                     except Exception as e:
                         st.error(f"Insert failed: {e}")
