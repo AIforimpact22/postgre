@@ -1,7 +1,13 @@
+# postgre_admin_portal.py
+# Streamlit PostgreSQL admin portal with DB backup feature
 import streamlit as st
 import psycopg2
 import pandas as pd
 import re
+import subprocess
+import tempfile
+import os
+import datetime as dt
 
 st.set_page_config(page_title="PostgreSQL Admin Portal", layout="wide")
 pg = st.secrets["superuser"]
@@ -13,8 +19,9 @@ def get_conn(dbname=None):
         user=pg["user"],
         password=pg["password"],
         host=pg["host"],
-        port=pg["port"]
+        port=pg["port"],
     )
+
 
 def list_databases():
     with get_conn() as conn:
@@ -24,6 +31,7 @@ def list_databases():
             "WHERE datistemplate = false ORDER BY datname;"
         )
         return [r[0] for r in cur.fetchall()]
+
 
 def get_schema(dbname):
     with get_conn(dbname) as conn:
@@ -38,6 +46,7 @@ def get_schema(dbname):
         )
         return cur.fetchall()
 
+
 def get_tables(dbname):
     with get_conn(dbname) as conn:
         cur = conn.cursor()
@@ -46,6 +55,7 @@ def get_tables(dbname):
             "WHERE table_schema='public' AND table_type='BASE TABLE';"
         )
         return [row[0] for row in cur.fetchall()]
+
 
 def get_columns(dbname, table):
     with get_conn(dbname) as conn:
@@ -57,9 +67,10 @@ def get_columns(dbname, table):
             WHERE table_schema='public' AND table_name=%s
             ORDER BY ordinal_position;
             """,
-            (table,)
+            (table,),
         )
         return cur.fetchall()
+
 
 def insert_row(dbname, table, data):
     with get_conn(dbname) as conn:
@@ -70,15 +81,55 @@ def insert_row(dbname, table, data):
         cur.execute(sql, list(data.values()))
         conn.commit()
 
+
+def run_pg_dump(dbname: str, fmt: str = "plain") -> bytes:
+    """
+    Run pg_dump for the given database and return the file bytes.
+    fmt: "plain" (SQL) or "custom" (compressed .dump)
+    """
+    flag = "p" if fmt == "plain" else "c"  # p -> plain SQL, c -> custom
+    suffix = "sql" if fmt == "plain" else "dump"
+    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{dbname}_{ts}.{suffix}"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = os.path.join(tmpdir, filename)
+        env = os.environ.copy()
+        env["PGPASSWORD"] = pg["password"]
+
+        cmd = [
+            "pg_dump",
+            "-h",
+            pg["host"],
+            "-p",
+            str(pg["port"]),
+            "-U",
+            pg["user"],
+            "-d",
+            dbname,
+            "-F",
+            flag,
+            "-f",
+            path,
+        ]
+        result = subprocess.run(cmd, env=env, capture_output=True)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.decode().strip())
+
+        with open(path, "rb") as fh:
+            return fh.read(), filename
+
+
 # ───────────────── Sidebar nav ─────────────────
 st.sidebar.title("Admin Navigation")
 PAGES = [
     "Create Database",
     "Edit Database",
-    "Browse Tables",         # ← NEW PAGE
+    "Browse Tables",   # existing
+    "Backup Database", # ← NEW PAGE
     "Connection Info",
     "Delete",
-    "Manual Data Entry"
+    "Manual Data Entry",
 ]
 
 if "active_page" not in st.session_state:
@@ -98,12 +149,13 @@ if page == "Create Database":
     st.title("Create Database")
     db_name = st.text_input(
         "Database name (letters, numbers, underscores only)",
-        max_chars=32, help="Must start with a letter."
+        max_chars=32,
+        help="Must start with a letter.",
     )
     db_valid = bool(re.match(r"^[A-Za-z][A-Za-z0-9_]*$", db_name))
     sql_extra = st.text_area(
         "Optional SQL to run *inside* the new database (e.g. CREATE TABLE ...)",
-        height=140
+        height=140,
     )
 
     if st.button("Create Database and Run SQL"):
@@ -117,6 +169,8 @@ if page == "Create Database":
                     cur.execute(f'CREATE DATABASE "{db_name}";')
                 conn.close()
                 st.success(f"Database `{db_name}` created.")
+
+                # optional SQL
                 if sql_extra.strip():
                     with get_conn(db_name) as new_conn:
                         with new_conn.cursor() as cur:
@@ -134,8 +188,7 @@ if page == "Create Database":
                 st.error(f"Error: {e}")
 
     if st.button("List All Databases"):
-        dbs = list_databases()
-        st.dataframe(pd.DataFrame({"Database": dbs}))
+        st.dataframe(pd.DataFrame({"database": list_databases()}))
 
 # ───────────────── Edit DB ──────────────────────
 elif page == "Edit Database":
@@ -187,19 +240,47 @@ elif page == "Browse Tables":
             if table_select:
                 cols = [c[0] for c in get_columns(db_select, table_select)]
                 limit = st.number_input(
-                    "Rows to display", min_value=1, max_value=20000, value=50
+                    "Rows to display", min_value=1, max_value=1000, value=50
                 )
                 with get_conn(db_select) as conn:
                     cur = conn.cursor()
-                    cur.execute(
-                        f'SELECT * FROM "{table_select}" LIMIT %s;',
-                        (limit,)
-                    )
+                    cur.execute(f'SELECT * FROM "{table_select}" LIMIT %s;', (limit,))
                     rows = cur.fetchall()
                 st.subheader(f"`{table_select}` preview")
                 st.dataframe(pd.DataFrame(rows, columns=cols))
         else:
             st.info("No tables found in this database.")
+
+# ───────────────── Backup DB ────────────────────
+elif page == "Backup Database":
+    st.title("Backup Database")
+    dbs = [d for d in list_databases() if d not in {"template0", "template1"}]
+    db_select = st.selectbox("Select a database:", dbs, key="backup_db")
+    fmt = st.radio(
+        "Backup format:",
+        ["SQL (plain text)", "Custom (compressed)"],
+        horizontal=True,
+        key="backup_fmt",
+    )
+
+    if st.button("Generate Backup", key="do_backup") and db_select:
+        with st.spinner("Running pg_dump…"):
+            try:
+                flag = "plain" if fmt.startswith("SQL") else "custom"
+                dump_bytes, filename = run_pg_dump(db_select, fmt=flag)
+                st.success(f"Backup for `{db_select}` ready ({len(dump_bytes):,} bytes).")
+                st.download_button(
+                    label="⬇️ Download Backup",
+                    data=dump_bytes,
+                    file_name=filename,
+                    mime="application/octet-stream",
+                )
+            except FileNotFoundError:
+                st.error("`pg_dump` executable not found in PATH.")
+            except RuntimeError as e:
+                st.error(f"Backup failed: {e}")
+            except Exception as e:
+                st.error(f"Unexpected error: {e}")
 
 # ───────────────── Connection Info ─────────────
 elif page == "Connection Info":
@@ -227,9 +308,7 @@ elif page == "Delete":
 
     if deletable:
         db_select = st.selectbox("Database to delete:", deletable)
-        confirm = st.checkbox(
-            f"⚠️ Permanently delete `{db_select}`?", key="confirm_del"
-        )
+        confirm = st.checkbox(f"⚠️ Permanently delete `{db_select}`?", key="confirm_del")
         if st.button("Delete Database"):
             if not confirm:
                 st.warning("Please confirm first.")
@@ -262,23 +341,22 @@ elif page == "Manual Data Entry":
             cols = get_columns(db_select, table)
             st.write(f"Columns in `{table}`: {[c[0] for c in cols]}")
             with st.form(key="entry_form"):
-                data = {}
+                form_data = {}
                 for col_name, data_type in cols:
                     if data_type.lower() in ("integer", "bigint") and col_name.endswith("id"):
                         continue
-                    data[col_name] = st.text_input(f"{col_name} ({data_type})", key=col_name)
-                submit = st.form_submit_button("Insert Row")
-                if submit:
+                    form_data[col_name] = st.text_input(f"{col_name} ({data_type})", key=col_name)
+                if st.form_submit_button("Insert Row"):
                     # convert types
                     for col_name, data_type in cols:
-                        val = data[col_name]
+                        val = form_data[col_name]
                         if val == "":
-                            data[col_name] = None
+                            form_data[col_name] = None
                         elif data_type in ("integer", "bigint"):
-                            data[col_name] = int(val)
+                            form_data[col_name] = int(val)
                         elif data_type == "double precision":
-                            data[col_name] = float(val)
-                    cleaned = {k: v for k, v in data.items() if v is not None}
+                            form_data[col_name] = float(val)
+                    cleaned = {k: v for k, v in form_data.items() if v is not None}
                     try:
                         insert_row(db_select, table, cleaned)
                         st.success(f"Inserted into `{table}`: {cleaned}")
