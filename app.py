@@ -1,5 +1,6 @@
 import streamlit as st
 import psycopg2
+import pandas as pd
 import re
 
 st.set_page_config(page_title="PostgreSQL Admin Portal", layout="wide")
@@ -123,7 +124,7 @@ if page == "Create Database":
                             if cur.description:
                                 rows = cur.fetchall()
                                 cols = [d[0] for d in cur.description]
-                                st.dataframe(rows, columns=cols)
+                                st.dataframe(pd.DataFrame(rows, columns=cols))
                             else:
                                 new_conn.commit()
                     st.success("Optional SQL executed inside new DB.")
@@ -133,7 +134,8 @@ if page == "Create Database":
                 st.error(f"Error: {e}")
 
     if st.button("List All Databases"):
-        st.table(list_databases())
+        dbs = list_databases()
+        st.dataframe(pd.DataFrame({"Database": dbs}))
 
 # ───────────────── Edit DB ──────────────────────
 elif page == "Edit Database":
@@ -165,7 +167,7 @@ elif page == "Edit Database":
                             if cur.description:
                                 rows = cur.fetchall()
                                 cols = [d[0] for d in cur.description]
-                                st.dataframe(rows, columns=cols)
+                                st.dataframe(pd.DataFrame(rows, columns=cols))
                             else:
                                 conn.commit()
                                 st.success("Command executed.")
@@ -195,7 +197,7 @@ elif page == "Browse Tables":
                     )
                     rows = cur.fetchall()
                 st.subheader(f"`{table_select}` preview")
-                st.dataframe(rows, columns=cols)
+                st.dataframe(pd.DataFrame(rows, columns=cols))
         else:
             st.info("No tables found in this database.")
 
