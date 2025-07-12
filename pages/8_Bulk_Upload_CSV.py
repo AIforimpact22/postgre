@@ -1,10 +1,15 @@
 # pages/8_Bulk_Upload_CSV.py
 """
 Bulk-upload a CSV into any PostgreSQL table (fast COPY).
+
  • Lets you pick schema.table
  • Validates that CSV headers exist in the target table
- • Uses psycopg2.sql to quote identifiers properly (no more relation errors)
+ • Uses psycopg2.sql to quote identifiers properly
+ • Opens the COPY connection with auto_commit=True so the ACCESS EXCLUSIVE
+   lock is released the moment the statement finishes (no lingering locks)
 """
+
+from __future__ import annotations
 
 import io
 from typing import List
@@ -14,11 +19,11 @@ import psycopg2
 from psycopg2 import sql
 import streamlit as st
 
-from db_utils import list_databases, get_conn   # make sure this exists
+from db_utils import list_databases, get_conn
 
-# ──────────────────────────────────── helpers ─────────────────────────────────
+# ───────────────────────────── helpers ──────────────────────────────
 def list_schemata_tables(db: str) -> List[str]:
-    """Return ['public.item', 'inventory.Item', …], excluding system schemas."""
+    """Return ['public.item', 'inventory.Item', …] excluding system schemas."""
     q = """
         SELECT table_schema, table_name
         FROM information_schema.tables
@@ -41,7 +46,7 @@ def get_table_columns(db: str, schema: str, table: str) -> List[str]:
         cur.execute(q, (schema, table))
         return [r[0] for r in cur.fetchall()]
 
-# ──────────────────────────────────── UI ──────────────────────────────────────
+# ─────────────────────────────── UI ────────────────────────────────
 st.title("📥 Bulk CSV Upload")
 
 db = st.selectbox("Target database", list_databases())
@@ -81,7 +86,7 @@ if missing:
 
 st.success(f"CSV looks good · {len(df)} rows · {len(df.columns)} columns")
 
-# ────────────────────────────── COPY to PostgreSQL ───────────────────────────
+# ────────────────────────── COPY to PostgreSQL ─────────────────────────
 st.radio("Insert mode", ["Append"], index=0)
 
 if st.button("🚀 Upload to database"):
@@ -92,15 +97,20 @@ if st.button("🚀 Upload to database"):
         df.to_csv(buf, index=False, header=False)
         buf.seek(0)
 
-        # Build safe COPY command:  COPY "schema"."table" ("c1","c2",…) FROM STDIN
-        copy_sql = sql.SQL("COPY {} ({}) FROM STDIN WITH (FORMAT csv)").format(
+        # COPY  "schema"."table" ("c1","c2",…) FROM STDIN WITH (FORMAT CSV)
+        copy_sql = sql.SQL(
+            "COPY {} ({}) FROM STDIN WITH (FORMAT csv)"
+        ).format(
             sql.Identifier(schema, tbl),
             sql.SQL(", ").join(map(sql.Identifier, df.columns)),
         )
 
         try:
-            with get_conn(db) as conn, conn.cursor() as cur:
+            # auto_commit=True ensures the COPY lock is released as soon
+            # as the statement completes — no lingering ACCESS EXCLUSIVE lock
+            with get_conn(db, auto_commit=True) as conn, conn.cursor() as cur:
                 cur.copy_expert(copy_sql, buf)
+
             st.success(f"Inserted {len(df)} rows into **{tbl_choice}** 🎉")
 
         except psycopg2.Error as e:
