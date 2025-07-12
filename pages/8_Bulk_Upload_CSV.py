@@ -6,10 +6,9 @@ Key points
 ──────────
 • Lets you pick schema.table
 • Validates that CSV headers exist in the target table
-• Runs COPY in auto-commit mode → no lingering locks
-• New: “Force-unlock & upload” button cancels / terminates sessions that
-  still hold an ACCESS EXCLUSIVE lock on the table (e.g. from a forgotten
-  TRUNCATE or failed COPY) before retrying the upload.
+• COPY runs in auto-commit mode → no lingering locks
+• 1.5 s lock_timeout & 5 min statement_timeout inside COPY
+• “Force-unlock & upload” cancels / terminates sessions that still hold a lock
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ def list_schemata_tables(db: str) -> List[str]:
           AND table_schema NOT IN ('pg_catalog', 'information_schema')
         ORDER BY table_schema, table_name;
     """
-    with get_conn(db) as conn, conn.cursor() as cur:
+    with get_conn(db, auto_commit=True) as conn, conn.cursor() as cur:
         cur.execute(q)
         return [f"{s}.{t}" for s, t in cur.fetchall()]
 
@@ -44,14 +43,14 @@ def get_table_columns(db: str, schema: str, table: str) -> List[str]:
         WHERE table_schema = %s AND table_name = %s
         ORDER BY ordinal_position;
     """
-    with get_conn(db) as conn, conn.cursor() as cur:
+    with get_conn(db, auto_commit=True) as conn, conn.cursor() as cur:
         cur.execute(q, (schema, table))
         return [r[0] for r in cur.fetchall()]
 
 def force_unlock_table(db: str, schema: str, table: str) -> List[int]:
     """
     Cancel (then terminate, if needed) every session that still holds a lock
-    on schema.table. Returns list of pids it acted on.
+    on schema.table. Returns list of pids it touched.
     """
     pid_list: List[int] = []
     look_sql = """
@@ -77,7 +76,10 @@ def force_unlock_table(db: str, schema: str, table: str) -> List[int]:
     return pid_list
 
 def copy_csv(conn, df: pd.DataFrame, schema: str, tbl: str):
-    """Execute COPY ... FROM STDIN using the provided connection (autocommit)."""
+    """
+    Execute COPY … FROM STDIN using the provided *autocommit* connection.
+    Includes short lock_timeout so we fail fast if another writer holds the table.
+    """
     buf = io.StringIO()
     df.to_csv(buf, index=False, header=False)
     buf.seek(0)
@@ -90,6 +92,10 @@ def copy_csv(conn, df: pd.DataFrame, schema: str, tbl: str):
     )
 
     with conn.cursor() as cur:
+        # fail in ≤1.5 s if another session keeps a lock
+        cur.execute("SET LOCAL lock_timeout = '1500ms';")
+        # up to 5 min for very large files
+        cur.execute("SET LOCAL statement_timeout = '300000ms';")
         cur.copy_expert(copy_sql, buf)
 
 # ─────────────────────────────── UI ────────────────────────────────
@@ -146,12 +152,16 @@ def do_upload(force: bool = False):
             st.info(f"Cancelled/terminated blocking pids: {pids or 'none found'}")
 
         with st.spinner("Copying data …"):
+            # auto_commit=True so the COPY lock vanishes on success
             with get_conn(db, auto_commit=True) as conn:
                 copy_csv(conn, df, schema, tbl)
+
         st.success(f"Inserted {len(df)} rows into **{tbl_choice}** 🎉")
 
     except psycopg2.errors.LockNotAvailable:
         st.error("Table is locked by another session. Try 'Force-unlock & upload'.")
+    except psycopg2.errors.QueryCanceled:
+        st.error("Upload aborted: statement or lock timeout.")
     except psycopg2.Error as e:
         st.error(f"Database error: {e.pgerror or e}")
     except Exception as e:
