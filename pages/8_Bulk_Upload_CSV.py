@@ -1,30 +1,31 @@
 # pages/8_Bulk_Upload_CSV.py
 """
 Bulk-upload a CSV into a chosen PostgreSQL table (fast COPY).
-✓ Schema-aware: lets you pick schema.table and quotes it safely.
-✓ Minimal validation: CSV header must match existing columns (subset is OK).
+✓ Schema-aware picker: shows schema.table and quotes safely.
+✓ Validates that CSV headers all exist in the table.
 """
 
 import io
+from typing import List
+
 import pandas as pd
 import psycopg2
 import streamlit as st
-from typing import List
 
-from db_utils import get_conn   # only dependency you need
+# 🛑  make sure ALL helpers are imported
+from db_utils import list_databases, get_conn   # <-- list_databases added
 
 # ────────────────────────────────────────────────────────────────
 # 🛠  CONFIG
 # -----------------------------------------------------------------------------
-# If you prefer relying on search_path instead of schema.table, flip this flag
-USE_SEARCH_PATH = False          # True → we run SET search_path after connect
-SEARCH_PATH = "public"           # override as you wish (comma-separated list)
+USE_SEARCH_PATH = False          # True → run SET search_path after connect
+SEARCH_PATH = "public"           # override as needed
 # -----------------------------------------------------------------------------
 
 st.title("📥 Bulk CSV Upload")
 
 # ────────────────────────────────────────────────────────────────
-# helper: fetch all user tables as schema.table  ---------------
+# helper functions ----------------------------------------------
 def list_schemata_tables(db: str) -> List[str]:
     """Return ['public.item', 'inventory.Item', …] excluding system schemas."""
     q = """
@@ -52,7 +53,7 @@ def get_table_columns(db: str, schema: str, table: str) -> List[str]:
 
 # ────────────────────────────────────────────────────────────────
 # 1️⃣  choose database & table ----------------------------------
-db = st.selectbox("Target database", options=list_databases())  # type: ignore
+db = st.selectbox("Target database", options=list_databases())
 if not db:
     st.stop()
 
@@ -92,19 +93,17 @@ if missing:
 st.success(f"CSV looks good · {len(df)} rows · {len(df.columns)} columns")
 
 # ────────────────────────────────────────────────────────────────
-# 3️⃣  insert mode (append-only for now) ------------------------
+# 3️⃣  insert mode (append-only) --------------------------------
 st.radio("Insert mode", ["Append"], index=0, help="Only *append* is supported.")
 
 if st.button("🚀 Upload to database"):
 
     with st.spinner("Copying data …"):
-        # buffer contains *only* data rows – COPY HEADER false equivalent
         buf = io.StringIO()
-        df.to_csv(buf, index=False, header=False)
+        df.to_csv(buf, index=False, header=False)  # data rows only
         buf.seek(0)
 
-        # Build proper identifier: "schema"."Table"
-        quoted_ident = f'"{schema}"."{tbl}"'
+        quoted_ident = f'"{schema}"."{tbl}"'       # safe identifier
 
         try:
             with get_conn(db) as conn, conn.cursor() as cur:
@@ -115,7 +114,7 @@ if st.button("🚀 Upload to database"):
                     file=buf,
                     table=quoted_ident,
                     columns=list(df.columns),
-                    sep=","
+                    sep=",",
                 )
             st.success(f"Inserted {len(df)} rows into **{tbl_choice}** 🎉")
 
