@@ -75,17 +75,24 @@ def force_unlock_table(db: str, schema: str, table: str) -> List[int]:
             pid_list.append(pid)
     return pid_list
 
+# ────────────────────────── main COPY helper ─────────────────────────
 def copy_csv(conn, df: pd.DataFrame, schema: str, tbl: str):
     """
     Execute COPY … FROM STDIN using the provided *autocommit* connection.
-    Includes short lock_timeout so we fail fast if another writer holds the table.
+    • Converts every blank / whitespace-only string to SQL NULL
+    • Uses NULL '\N' so Postgres treats \N as NULL
+    • Keeps the original short lock & statement timeouts
     """
+    # turn empty or whitespace-only strings → pandas NA (works for any table)
+    df.replace(r"^\s*$", pd.NA, regex=True, inplace=True)
+
+    # write DataFrame to an in-memory CSV; NA values become \N
     buf = io.StringIO()
-    df.to_csv(buf, index=False, header=False)
+    df.to_csv(buf, index=False, header=False, na_rep="\\N")
     buf.seek(0)
 
     copy_sql = sql.SQL(
-        "COPY {} ({}) FROM STDIN WITH (FORMAT csv)"
+        "COPY {} ({}) FROM STDIN WITH (FORMAT csv, NULL '\\N')"
     ).format(
         sql.Identifier(schema, tbl),
         sql.SQL(", ").join(map(sql.Identifier, df.columns)),
