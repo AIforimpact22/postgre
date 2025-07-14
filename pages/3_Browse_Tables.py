@@ -20,7 +20,8 @@ if not tables:
 tbl_choice = st.selectbox("Table", tables)
 schema, table = tbl_choice.split(".")
 
-limit = st.number_input("Rows to display", 1, 1000, 50)
+# Enter 0 to load the entire table
+limit = st.number_input("Rows to display (0 = all)", 0, 1_000_000, 50)
 
 # ── READ-ONLY query in AUTOCOMMIT mode (so no lingering locks) ─
 with get_conn(db, auto_commit=True) as conn, conn.cursor() as cur:
@@ -28,11 +29,18 @@ with get_conn(db, auto_commit=True) as conn, conn.cursor() as cur:
     cur.execute("SET LOCAL statement_timeout = '30000ms';")
 
     try:
-        cur.execute(
-            sql.SQL("SELECT * FROM {} LIMIT %s")
-               .format(sql.Identifier(schema, table)),
-            (limit,),
-        )
+        if limit > 0:
+            cur.execute(
+                sql.SQL("SELECT * FROM {} LIMIT %s")
+                   .format(sql.Identifier(schema, table)),
+                (limit,),
+            )
+        else:
+            cur.execute(
+                sql.SQL("SELECT * FROM {}")
+                   .format(sql.Identifier(schema, table))
+            )
+
         rows = cur.fetchall()
         cols = get_table_columns_fq(db, schema, table)
         st.dataframe(pd.DataFrame(rows, columns=cols))
