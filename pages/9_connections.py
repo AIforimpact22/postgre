@@ -39,26 +39,32 @@ if df.empty:
 
 st.caption("You can terminate (kill) background or stuck connections directly from here.")
 
-# Choose connections to kill
-st.write("### Active Connections")
+def highlight_row(row):
+    if row["state"] == "idle in transaction":
+        return ['background-color: #f59e42; color: #fff'] * len(row)
+    if str(row["wait_event_type"]).strip().lower() not in ["", "none", "null"] and pd.notnull(row["wait_event_type"]):
+        return ['background-color: #f43f5e; color: #fff'] * len(row)
+    return [''] * len(row)
+
+st.dataframe(
+    df.style.apply(highlight_row, axis=1),
+    use_container_width=True,
+    hide_index=True,
+    height=min(800, max(400, len(df)*38)),
+)
+
+st.write("### Terminate Connections")
 for idx, row in df.iterrows():
-    col1, col2, col3 = st.columns([3, 5, 1])
-    with col1:
-        st.write(f"**PID:** `{row['pid']}` | **User:** `{row['user']}` | **DB:** `{row['database']}`")
-        st.write(f"Client: `{row['client_addr']}` | State: **{row['state']}**")
-        if str(row["wait_event_type"]).strip().lower() not in ["", "none", "null"] and pd.notnull(row["wait_event_type"]):
-            st.warning(f"Waiting event: {row['wait_event_type']}")
+    pid = row["pid"]
+    cols = st.columns([6, 1])
+    with cols[0]:
+        st.write(f"PID: `{pid}` | User: `{row['user']}` | DB: `{row['database']}` | State: **{row['state']}**")
         st.code(str(row["query"]), language="sql")
-    with col2:
-        st.write(f"Started: {row['backend_start']}")
-        st.write(f"Query start: {row['query_start']}")
-        st.write(f"Last state change: {row['state_change']}")
-    with col3:
-        if row['state'] == "idle in transaction" or st.button(f"Terminate PID {row['pid']}", key=f"kill{row['pid']}"):
-            terminate_connection(row["pid"])
-            st.warning(f"Terminated connection PID {row['pid']}")
-            st.experimental_rerun()
-    st.markdown("---")
+    with cols[1]:
+        if st.button(f"Terminate", key=f"kill{pid}"):
+            terminate_connection(pid)
+            st.warning(f"Terminated connection PID {pid}")
+            st.rerun()
 
 st.markdown(f"""
 **Total connections:** `{len(df)}`  
@@ -67,4 +73,4 @@ st.markdown(f"""
 """)
 
 if st.button("Refresh connections list"):
-    st.experimental_rerun()
+    st.rerun()
