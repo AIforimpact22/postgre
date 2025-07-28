@@ -1,17 +1,9 @@
-# connections.py
 import streamlit as st
 import pandas as pd
-import psycopg2
 from db_utils import get_conn
 
 st.title("🧑‍💻 Active PostgreSQL Connections")
 
-# Show only for admins
-if not st.session_state.get("authenticated", False):
-    st.warning("You must unlock the app to use this page.")
-    st.stop()
-
-# Query connections
 try:
     with get_conn(auto_commit=True) as conn, conn.cursor() as cur:
         cur.execute("""
@@ -41,13 +33,12 @@ except Exception as e:
 if df.empty:
     st.info("No active connections.")
 else:
-    st.caption("Showing all active connections (across all databases you have access to).")
+    st.caption("All active connections across all databases (as seen by the superuser).")
     st.write("**Legend:**")
     st.markdown("""
 - <span style="color:#f59e42;">**idle in transaction**</span> or <span style="color:#f43f5e;">**waiting**</span>: possible connection/locking issues.
 """, unsafe_allow_html=True)
 
-    # Color rows
     def highlight_row(row):
         if row["state"] == "idle in transaction":
             return ['background-color: #f59e42; color: #fff'] * len(row)
