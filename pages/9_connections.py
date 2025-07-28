@@ -31,6 +31,17 @@ def terminate_connection(pid):
     with get_conn(auto_commit=True) as conn, conn.cursor() as cur:
         cur.execute("SELECT pg_terminate_backend(%s)", (pid,))
 
+def terminate_all_idle_in_transaction(df):
+    idle_pids = df[df['state'] == 'idle in transaction']["pid"].tolist()
+    count = 0
+    for pid in idle_pids:
+        try:
+            terminate_connection(pid)
+            count += 1
+        except Exception as e:
+            st.error(f"Failed to terminate PID {pid}: {e}")
+    return count
+
 # Get and show connections
 df = get_activity()
 if df.empty:
@@ -38,6 +49,11 @@ if df.empty:
     st.stop()
 
 st.caption("You can terminate (kill) background or stuck connections directly from here.")
+
+if st.button("Terminate all idle in transaction"):
+    count = terminate_all_idle_in_transaction(df)
+    st.warning(f"Terminated {count} idle in transaction connections.")
+    st.rerun()
 
 def highlight_row(row):
     if row["state"] == "idle in transaction":
