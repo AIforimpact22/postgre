@@ -2,9 +2,9 @@ import streamlit as st
 import pandas as pd
 from db_utils import get_conn
 
-st.title("🧑‍💻 Active PostgreSQL Connections")
+st.title("🧑‍💻 Active PostgreSQL Connections (with Terminate)")
 
-try:
+def get_activity():
     with get_conn(auto_commit=True) as conn, conn.cursor() as cur:
         cur.execute("""
             SELECT
@@ -25,39 +25,46 @@ try:
         """)
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
-        df = pd.DataFrame(rows, columns=cols)
-except Exception as e:
-    st.error(f"Could not query connections: {e}")
-    st.stop()
+        return pd.DataFrame(rows, columns=cols)
 
+def terminate_connection(pid):
+    with get_conn(auto_commit=True) as conn, conn.cursor() as cur:
+        cur.execute("SELECT pg_terminate_backend(%s)", (pid,))
+
+# Get and show connections
+df = get_activity()
 if df.empty:
     st.info("No active connections.")
-else:
-    st.caption("All active connections across all databases (as seen by the superuser).")
-    st.write("**Legend:**")
-    st.markdown("""
-- <span style="color:#f59e42;">**idle in transaction**</span> or <span style="color:#f43f5e;">**waiting**</span>: possible connection/locking issues.
-""", unsafe_allow_html=True)
+    st.stop()
 
-    def highlight_row(row):
-        if row["state"] == "idle in transaction":
-            return ['background-color: #f59e42; color: #fff'] * len(row)
+st.caption("You can terminate (kill) background or stuck connections directly from here.")
+
+# Choose connections to kill
+st.write("### Active Connections")
+for idx, row in df.iterrows():
+    col1, col2, col3 = st.columns([3, 5, 1])
+    with col1:
+        st.write(f"**PID:** `{row['pid']}` | **User:** `{row['user']}` | **DB:** `{row['database']}`")
+        st.write(f"Client: `{row['client_addr']}` | State: **{row['state']}**")
         if str(row["wait_event_type"]).strip().lower() not in ["", "none", "null"] and pd.notnull(row["wait_event_type"]):
-            return ['background-color: #f43f5e; color: #fff'] * len(row)
-        return [''] * len(row)
+            st.warning(f"Waiting event: {row['wait_event_type']}")
+        st.code(str(row["query"]), language="sql")
+    with col2:
+        st.write(f"Started: {row['backend_start']}")
+        st.write(f"Query start: {row['query_start']}")
+        st.write(f"Last state change: {row['state_change']}")
+    with col3:
+        if row['state'] == "idle in transaction" or st.button(f"Terminate PID {row['pid']}", key=f"kill{row['pid']}"):
+            terminate_connection(row["pid"])
+            st.warning(f"Terminated connection PID {row['pid']}")
+            st.experimental_rerun()
+    st.markdown("---")
 
-    st.dataframe(
-        df.style.apply(highlight_row, axis=1),
-        use_container_width=True,
-        hide_index=True,
-        height=min(800, max(400, len(df)*38)),
-    )
-
-    st.markdown(f"""
+st.markdown(f"""
 **Total connections:** `{len(df)}`  
 **Unique users:** `{df['user'].nunique()}`  
 **Unique databases:** `{df['database'].nunique()}`
 """)
 
-    if st.button("Refresh connections list"):
-        st.experimental_rerun()
+if st.button("Refresh connections list"):
+    st.experimental_rerun()
