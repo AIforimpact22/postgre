@@ -2,7 +2,7 @@
 import json
 import math
 import decimal
-from typing import Any
+from typing import Any, List, Optional, Tuple
 
 import streamlit as st
 import pandas as pd
@@ -133,6 +133,89 @@ def to_arrow_friendly(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Ordering helpers (to show "last inserted" first when possible)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def get_primary_key_columns(conn, schema: str, table: str) -> List[str]:
+    """
+    Return primary key column names in order, or [] if none.
+    """
+    q = """
+        SELECT a.attname
+        FROM pg_index i
+        JOIN pg_attribute a
+          ON a.attrelid = i.indrelid
+         AND a.attnum = ANY(i.indkey)
+        WHERE i.indrelid = %s::regclass
+          AND i.indisprimary
+        ORDER BY array_position(i.indkey, a.attnum);
+    """
+    fq = f"{schema}.{table}"
+    with conn.cursor() as c:
+        c.execute(q, (fq,))
+        return [r[0] for r in c.fetchall()]
+
+def get_columns_with_types(conn, schema: str, table: str) -> List[Tuple[str, str]]:
+    """
+    Return [(column_name, udt_name)] for the table.
+    """
+    q = """
+        SELECT a.attname, t.typname
+        FROM pg_attribute a
+        JOIN pg_type t ON t.oid = a.atttypid
+        WHERE a.attrelid = %s::regclass
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+        ORDER BY a.attnum;
+    """
+    fq = f"{schema}.{table}"
+    with conn.cursor() as c:
+        c.execute(q, (fq,))
+        return [(r[0], r[1]) for r in c.fetchall()]
+
+COMMON_TS_NAMES = {"created_at", "updated_at", "inserted_at", "createdon", "updatedon", "timestamp", "ts", "created", "updated"}
+COMMON_ID_NAMES = {"id"}
+
+def pick_ordering_columns(conn, schema: str, table: str) -> Tuple[List[str], str]:
+    """
+    Heuristic to pick an ORDER BY that likely returns newest rows first.
+    Returns (columns, strategy) where columns is a list of column names to ORDER BY DESC.
+    Strategy is a short label for UI.
+    """
+    # 1) Primary key (DESC)
+    pk_cols = get_primary_key_columns(conn, schema, table)
+    if pk_cols:
+        return pk_cols, "primary key"
+
+    # 2) Timestamp-ish columns (DESC)
+    cols_types = get_columns_with_types(conn, schema, table)
+    # Prefer timestamp/timestamptz/date columns by common names
+    ts_candidates = []
+    for name, typ in cols_types:
+        typ_l = (typ or "").lower()
+        if typ_l in {"timestamptz", "timestamp", "timestampz", "timestamp without time zone", "timestamp with time zone", "date"}:
+            ts_candidates.append(name)
+    # sort by whether name looks common, then keep first
+    if ts_candidates:
+        ts_candidates.sort(key=lambda n: (0 if n.lower() in COMMON_TS_NAMES else 1, n))
+        return [ts_candidates[0]], "timestamp"
+
+    # 3) Numeric id-like columns (DESC)
+    id_candidates = []
+    for name, typ in cols_types:
+        typ_l = (typ or "").lower()
+        if name.lower() in COMMON_ID_NAMES or name.lower().endswith("_id"):
+            if typ_l in {"int2", "int4", "int8", "serial", "bigserial", "numeric"}:
+                id_candidates.append(name)
+    if id_candidates:
+        id_candidates.sort(key=lambda n: (0 if n.lower() in COMMON_ID_NAMES else 1, n))
+        return [id_candidates[0]], "id"
+
+    # 4) Fallback: physical order (ctid) DESC — heuristic only
+    return ["ctid"], "ctid"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # UI: pick DB & table
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -155,8 +238,8 @@ if limit > 0:
     # Show offset only when limiting
     offset = st.number_input("Offset (for paging)", 0, 1_000_000_000, 0)
 
-# Optional: simple ORDER BY primary key or first column?
-# Keeping behavior identical to the original (no ORDER BY), which is fastest.
+# Order preference
+newest_first = st.checkbox("Newest first (DESC)", value=True, help="When enabled, attempts to show the most recently inserted rows first (based on PK/timestamp/id, else ctid).")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Query + display
@@ -167,25 +250,42 @@ with get_conn(db, auto_commit=True) as conn, conn.cursor() as cur:
     cur.execute("SET LOCAL lock_timeout = '1500ms';")
     cur.execute("SET LOCAL statement_timeout = '30000ms';")
 
+    # Decide ORDER BY
+    order_cols: Optional[List[str]] = None
+    order_strategy = None
+    if newest_first:
+        try:
+            order_cols, order_strategy = pick_ordering_columns(conn, schema, table)
+        except Exception:
+            # If catalog lookup fails for any reason, fall back to no explicit ordering
+            order_cols, order_strategy = None, None
+
     try:
-        if limit > 0:
-            if offset > 0:
-                cur.execute(
-                    sql.SQL("SELECT * FROM {} OFFSET %s LIMIT %s")
-                       .format(sql.Identifier(schema, table)),
-                    (offset, limit),
-                )
-            else:
-                cur.execute(
-                    sql.SQL("SELECT * FROM {} LIMIT %s")
-                       .format(sql.Identifier(schema, table)),
-                    (limit,),
-                )
+        # Build SELECT
+        base = sql.SQL("SELECT * FROM {}").format(sql.Identifier(schema, table))
+
+        # ORDER BY
+        if order_cols:
+            order_exprs = [
+                (sql.Identifier(c) if c != "ctid" else sql.SQL("ctid"))  # ctid is a system column, not an identifier
+                for c in order_cols
+            ]
+            # DESC for each chosen column
+            order_by = sql.SQL(", ").join([sql.SQL("{} DESC").format(e) for e in order_exprs])
+            base = base + sql.SQL(" ORDER BY ") + order_by
+
+        # OFFSET/LIMIT
+        if limit > 0 and offset > 0:
+            q = base + sql.SQL(" OFFSET %s LIMIT %s")
+            params = (offset, limit)
+        elif limit > 0:
+            q = base + sql.SQL(" LIMIT %s")
+            params = (limit,)
         else:
-            cur.execute(
-                sql.SQL("SELECT * FROM {}")
-                   .format(sql.Identifier(schema, table))
-            )
+            q = base
+            params = ()
+
+        cur.execute(q, params)
 
         rows = cur.fetchall()
         cols = get_table_columns_fq(db, schema, table)
@@ -195,7 +295,14 @@ with get_conn(db, auto_commit=True) as conn, conn.cursor() as cur:
         # ArrowInvalid: Could not convert '0' with type str: tried to convert to int64
         df = to_arrow_friendly(df_raw)
 
-        st.caption(f"Showing {len(df):,} row(s)" + (f" starting at offset {offset:,}" if limit > 0 and offset else ""))
+        caption_bits = [f"Showing {len(df):,} row(s)"]
+        if limit > 0 and offset:
+            caption_bits.append(f"starting at offset {offset:,}")
+        if newest_first and order_strategy:
+            caption_bits.append(f"ordered by {order_strategy} DESC")
+        elif newest_first:
+            caption_bits.append("ordered DESC")
+        st.caption(" • ".join(caption_bits))
 
         st.dataframe(df, use_container_width=True, hide_index=True)
 
@@ -204,7 +311,7 @@ with get_conn(db, auto_commit=True) as conn, conn.cursor() as cur:
         st.download_button(
             "Download CSV",
             data=csv,
-            file_name=f"{schema}.{table}" + (f"__offset_{offset}" if offset else "") + (f"__limit_{limit}" if limit else "") + ".csv",
+            file_name=f"{schema}.{table}" + (f"__offset_{offset}" if offset else "") + (f"__limit_{limit}" if limit else "") + ( "__desc" if newest_first else "" ) + ".csv",
             mime="text/csv",
         )
 
